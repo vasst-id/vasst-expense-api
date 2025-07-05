@@ -1,0 +1,75 @@
+definitions:
+  entity.ApiResponse:
+    properties:
+      data: {}
+      error:
+        type: string
+      success:
+        type: boolean
+    type: object
+  entity.CrudDTO:
+    properties:
+      id:
+        type: integer
+      value:
+        type: string
+    type: object
+  entity.HelloDTO:
+    properties:
+      name:
+        type: string
+    required:
+    - name
+    type: object
+info:
+  contact: {}
+paths:
+  /v1/find/{id}:
+    get:
+      consumes:
+      - application/json
+      description: FindByID
+      parameters:
+      - description: id
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/entity.ApiResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/entity.CrudDTO'
+              type: object
+      summary: FindByID
+      tags:
+      - FindByID v1
+  /v1/hello:
+    post:
+      consumes:
+      - application/json
+      description: hello
+      parameters:
+      - description: hello request body
+        in: body
+        name: requestBody
+        required: true
+        schema:
+          $ref: '#/definitions/entity.HelloDTO'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/entity.ApiResponse'
+      summary: hello
+      tags:
+      - hello v1
+swagger: "2.0"
