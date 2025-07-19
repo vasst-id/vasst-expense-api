@@ -26,10 +26,9 @@ func NewWebhookEventHandler(pub events.Publisher) *WebhookEventHandler {
 }
 
 // HandleWebhook processes webhook payloads from any platform
-func (h *WebhookEventHandler) HandleWebhook(ctx context.Context, platform string, organizationID uuid.UUID, payload map[string]interface{}) error {
+func (h *WebhookEventHandler) HandleWebhook(ctx context.Context, platform string, payload map[string]interface{}) error {
 	log.Info().
 		Str("platform", platform).
-		Str("organization_id", organizationID.String()).
 		Msg("Processing webhook event")
 
 	// Get platform-specific processor

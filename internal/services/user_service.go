@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 	"errors"
-	"math/rand"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -18,22 +18,24 @@ import (
 type (
 	UserService interface {
 		// Global (superadmin) methods
-		CreateUser(ctx context.Context, input *entities.CreateUserInput) (*entities.User, error)
+		CreateUser(ctx context.Context, input *entities.CreateUserInput) (*entities.LoginResponse, error)
 		UpdateUser(ctx context.Context, userID uuid.UUID, input *entities.UpdateUserInput) (*entities.User, error)
 		DeleteUser(ctx context.Context, userID uuid.UUID) error
 		ListAllUsers(ctx context.Context, limit, offset int) ([]*entities.User, error)
 		GetUserByID(ctx context.Context, userID uuid.UUID) (*entities.User, error)
+		GetUserByEmail(ctx context.Context, email string) (*entities.User, error)
 		GetUserByPhoneNumber(ctx context.Context, phoneNumber string) (*entities.User, error)
-		GetUserByUsername(ctx context.Context, username string) (*entities.User, error)
 		ResetUserPassword(ctx context.Context, input *entities.ResetPasswordInput) error
-		GenerateUserPassword(ctx context.Context, userID uuid.UUID, input *entities.GenerateUserPasswordInput) (string, error)
 
-		// Organization-scoped methods
-		ListUsersByOrganization(ctx context.Context, organizationID uuid.UUID, limit, offset int) ([]*entities.User, error)
-		GetUserByIDAndOrganization(ctx context.Context, userID, organizationID uuid.UUID) (*entities.User, error)
-		GetUserByPhoneNumberAndOrganization(ctx context.Context, phoneNumber string, organizationID uuid.UUID) (*entities.User, error)
-		GetUserByUsernameAndOrganization(ctx context.Context, username string, organizationID uuid.UUID) (*entities.User, error)
-		Login(ctx context.Context, input *entities.LoginInput) (*entities.LoginResponse, error)
+		// Authentication methods
+		Login(ctx context.Context, input *entities.LoginRequest) (*entities.LoginResponse, error)
+		ForgotPassword(ctx context.Context, input *entities.ForgotPasswordRequest) error
+		ResetPassword(ctx context.Context, input *entities.ResetPasswordRequest) error
+		ChangePassword(ctx context.Context, input *entities.ChangePasswordRequest) error
+		VerifyPhone(ctx context.Context, input *entities.VerifyPhoneRequest) error
+		ResendVerificationCode(ctx context.Context, input *entities.ResendVerificationCodeRequest) error
+		VerifyEmail(ctx context.Context, input *entities.VerifyEmailRequest) error
+		ResendVerificationEmail(ctx context.Context, input *entities.ResendVerificationEmailRequest) error
 	}
 
 	userService struct {
@@ -50,41 +52,49 @@ func NewUserService(userRepo repositories.UserRepository, authMiddleware *middle
 	}
 }
 
-// Global (superadmin) methods
-func (s *userService) CreateUser(ctx context.Context, input *entities.CreateUserInput) (*entities.User, error) {
+// CreateUser creates a new user
+func (s *userService) CreateUser(ctx context.Context, input *entities.CreateUserInput) (*entities.LoginResponse, error) {
+	// Validate required fields
+	// if input.Email == "" {
+	// 	return nil, errors.New("email is required")
+	// }
 	if input.PhoneNumber == "" {
 		return nil, errors.New("phone number is required")
 	}
-	if input.UserFullName == "" {
-		return nil, errors.New("full name is required")
+	if input.FirstName == "" {
+		return nil, errors.New("first name is required")
 	}
-	if input.Username == "" {
-		return nil, errors.New("username is required")
+	if input.LastName == "" {
+		return nil, errors.New("last name is required")
 	}
 	if input.Password == "" {
 		return nil, errors.New("password is required")
 	}
-	if input.OrganizationID == uuid.Nil {
-		return nil, errors.New("organization ID is required")
-	}
-	if input.RoleID == 0 {
-		return nil, errors.New("role ID is required")
+	if len(input.Password) != 6 {
+		return nil, errors.New("password must be exactly 6 digits")
 	}
 
-	existingUser, err := s.userRepo.FindByPhoneNumber(ctx, input.PhoneNumber)
+	// Set default currency ID
+	currencyID := 1
+
+	// Set default subscription plan ID
+	subscriptionPlanID := 1
+
+	// Check if user already exists
+	// existingUser, err := s.userRepo.FindByEmail(ctx, input.Email)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// if existingUser != nil {
+	// 	return nil, errorsutil.New(409, "user with this email already exists")
+	// }
+
+	existingPhone, err := s.userRepo.FindByPhoneNumber(ctx, input.PhoneNumber)
 	if err != nil {
 		return nil, err
 	}
-	if existingUser != nil {
+	if existingPhone != nil {
 		return nil, errorsutil.New(409, "user with this phone number already exists")
-	}
-
-	existingUsername, err := s.userRepo.FindByUsername(ctx, input.Username)
-	if err != nil {
-		return nil, err
-	}
-	if existingUsername != nil {
-		return nil, errorsutil.New(409, "user with this username already exists")
 	}
 
 	// Hash the password
@@ -93,24 +103,48 @@ func (s *userService) CreateUser(ctx context.Context, input *entities.CreateUser
 		return nil, err
 	}
 
-	user := &entities.User{
-		UserID:         uuid.New(),
-		OrganizationID: input.OrganizationID,
-		RoleID:         input.RoleID,
-		UserFullName:   input.UserFullName,
-		PhoneNumber:    input.PhoneNumber,
-		Username:       input.Username,
-		Password:       string(hashedPassword),
-		IsActive:       input.IsActive,
+	// Set default timezone if not provided
+	timezone := input.Timezone
+	if timezone == "" {
+		timezone = "Asia/Jakarta"
 	}
 
-	if err := s.userRepo.Create(ctx, user); err != nil {
+	user := &entities.User{
+		UserID:             uuid.New(),
+		Email:              "", // This will be NULL in database since it's empty
+		PhoneNumber:        input.PhoneNumber,
+		PasswordHash:       string(hashedPassword),
+		FirstName:          input.FirstName,
+		LastName:           input.LastName,
+		Timezone:           timezone,
+		CurrencyID:         currencyID,
+		SubscriptionPlanID: subscriptionPlanID,
+		Status:             entities.UserStatusActive,
+	}
+
+	// Create the user - the repository will populate the struct with the actual data from DB
+	createdUser, err := s.userRepo.Create(ctx, user)
+	if err != nil {
 		return nil, err
 	}
 
-	return user, nil
+	// Generate JWT token
+	token, err := s.authMiddleware.GenerateToken(&createdUser)
+	if err != nil {
+		return nil, err
+	}
+
+	loginResponse := &entities.LoginResponse{
+		AccessToken: token,
+		TokenType:   "Bearer",
+		ExpiresIn:   3600, // 1 hour
+		User:        &createdUser,
+	}
+
+	return loginResponse, nil
 }
 
+// UpdateUser updates an existing user
 func (s *userService) UpdateUser(ctx context.Context, userID uuid.UUID, input *entities.UpdateUserInput) (*entities.User, error) {
 	existingUser, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
@@ -120,6 +154,18 @@ func (s *userService) UpdateUser(ctx context.Context, userID uuid.UUID, input *e
 		return nil, errorsutil.New(404, "user not found")
 	}
 
+	// Check for email uniqueness
+	if input.Email != "" && input.Email != existingUser.Email {
+		userWithEmail, err := s.userRepo.FindByEmail(ctx, input.Email)
+		if err != nil {
+			return nil, err
+		}
+		if userWithEmail != nil && userWithEmail.UserID != userID {
+			return nil, errorsutil.New(409, "email already in use")
+		}
+	}
+
+	// Check for phone number uniqueness
 	if input.PhoneNumber != "" && input.PhoneNumber != existingUser.PhoneNumber {
 		userWithPhone, err := s.userRepo.FindByPhoneNumber(ctx, input.PhoneNumber)
 		if err != nil {
@@ -129,42 +175,44 @@ func (s *userService) UpdateUser(ctx context.Context, userID uuid.UUID, input *e
 			return nil, errorsutil.New(409, "phone number already in use")
 		}
 	}
-	if input.Username != "" && input.Username != existingUser.Username {
-		userWithUsername, err := s.userRepo.FindByUsername(ctx, input.Username)
-		if err != nil {
-			return nil, err
-		}
-		if userWithUsername != nil && userWithUsername.UserID != userID {
-			return nil, errorsutil.New(409, "username already in use")
-		}
-	}
 
-	if input.UserFullName != "" {
-		existingUser.UserFullName = input.UserFullName
+	// Update fields
+	if input.Email != "" {
+		existingUser.Email = input.Email
 	}
 	if input.PhoneNumber != "" {
 		existingUser.PhoneNumber = input.PhoneNumber
 	}
-	if input.Username != "" {
-		existingUser.Username = input.Username
+	if input.FirstName != "" {
+		existingUser.FirstName = input.FirstName
 	}
-	if input.Password != "" {
-		existingUser.Password = input.Password
+	if input.LastName != "" {
+		existingUser.LastName = input.LastName
 	}
-	if input.RoleID != 0 {
-		existingUser.RoleID = input.RoleID
+	if input.Timezone != "" {
+		existingUser.Timezone = input.Timezone
 	}
-	if input.IsActive != nil {
-		existingUser.IsActive = *input.IsActive
+	if input.CurrencyID != 0 {
+		existingUser.CurrencyID = input.CurrencyID
+	}
+	if input.SubscriptionPlanID != 0 {
+		existingUser.SubscriptionPlanID = input.SubscriptionPlanID
+	}
+	if input.Status != 0 {
+		existingUser.Status = input.Status
 	}
 
-	if err := s.userRepo.Update(ctx, existingUser); err != nil {
+	// Update the user - the repository will populate the struct with the actual data from DB
+	updatedUser, err := s.userRepo.Update(ctx, existingUser)
+	if err != nil {
 		return nil, err
 	}
 
-	return existingUser, nil
+	// Return the user with data populated from the database
+	return &updatedUser, nil
 }
 
+// DeleteUser deletes a user
 func (s *userService) DeleteUser(ctx context.Context, userID uuid.UUID) error {
 	existingUser, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
@@ -176,10 +224,12 @@ func (s *userService) DeleteUser(ctx context.Context, userID uuid.UUID) error {
 	return s.userRepo.Delete(ctx, userID)
 }
 
+// ListAllUsers returns all users with pagination
 func (s *userService) ListAllUsers(ctx context.Context, limit, offset int) ([]*entities.User, error) {
 	return s.userRepo.ListAll(ctx, limit, offset)
 }
 
+// GetUserByID returns a user by ID
 func (s *userService) GetUserByID(ctx context.Context, userID uuid.UUID) (*entities.User, error) {
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
@@ -191,6 +241,19 @@ func (s *userService) GetUserByID(ctx context.Context, userID uuid.UUID) (*entit
 	return user, nil
 }
 
+// GetUserByEmail returns a user by email
+func (s *userService) GetUserByEmail(ctx context.Context, email string) (*entities.User, error) {
+	user, err := s.userRepo.FindByEmail(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, errorsutil.New(404, "user not found")
+	}
+	return user, nil
+}
+
+// GetUserByPhoneNumber returns a user by phone number
 func (s *userService) GetUserByPhoneNumber(ctx context.Context, phoneNumber string) (*entities.User, error) {
 	user, err := s.userRepo.FindByPhoneNumber(ctx, phoneNumber)
 	if err != nil {
@@ -202,55 +265,7 @@ func (s *userService) GetUserByPhoneNumber(ctx context.Context, phoneNumber stri
 	return user, nil
 }
 
-func (s *userService) GetUserByUsername(ctx context.Context, username string) (*entities.User, error) {
-	user, err := s.userRepo.FindByUsername(ctx, username)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, errorsutil.New(404, "user not found")
-	}
-	return user, nil
-}
-
-// Organization-scoped methods
-func (s *userService) ListUsersByOrganization(ctx context.Context, organizationID uuid.UUID, limit, offset int) ([]*entities.User, error) {
-	return s.userRepo.ListByOrganization(ctx, organizationID, limit, offset)
-}
-
-func (s *userService) GetUserByIDAndOrganization(ctx context.Context, userID, organizationID uuid.UUID) (*entities.User, error) {
-	user, err := s.userRepo.FindByIDAndOrganization(ctx, userID, organizationID)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, errorsutil.New(404, "user not found")
-	}
-	return user, nil
-}
-
-func (s *userService) GetUserByPhoneNumberAndOrganization(ctx context.Context, phoneNumber string, organizationID uuid.UUID) (*entities.User, error) {
-	user, err := s.userRepo.FindByPhoneNumberAndOrganization(ctx, phoneNumber, organizationID)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, errorsutil.New(404, "user not found")
-	}
-	return user, nil
-}
-
-func (s *userService) GetUserByUsernameAndOrganization(ctx context.Context, username string, organizationID uuid.UUID) (*entities.User, error) {
-	user, err := s.userRepo.FindByUsernameAndOrganization(ctx, username, organizationID)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, errorsutil.New(404, "user not found")
-	}
-	return user, nil
-}
-
+// ResetUserPassword resets a user's password
 func (s *userService) ResetUserPassword(ctx context.Context, input *entities.ResetPasswordInput) error {
 	// Validate input
 	if input.UserID == uuid.Nil {
@@ -261,6 +276,9 @@ func (s *userService) ResetUserPassword(ctx context.Context, input *entities.Res
 	}
 	if input.NewPassword == "" {
 		return errors.New("new password is required")
+	}
+	if len(input.NewPassword) != 6 {
+		return errors.New("new password must be exactly 6 digits")
 	}
 
 	// Get the user
@@ -273,7 +291,7 @@ func (s *userService) ResetUserPassword(ctx context.Context, input *entities.Res
 	}
 
 	// Verify old password
-	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.OldPassword))
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.OldPassword))
 	if err != nil {
 		return errorsutil.New(400, "old password is incorrect")
 	}
@@ -285,52 +303,29 @@ func (s *userService) ResetUserPassword(ctx context.Context, input *entities.Res
 	}
 
 	// Update the user's password
-	user.Password = string(hashedPassword)
+	user.PasswordHash = string(hashedPassword)
 
 	// Save the updated user
-	if err := s.userRepo.Update(ctx, user); err != nil {
+	_, err = s.userRepo.Update(ctx, user)
+	if err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *userService) GenerateUserPassword(ctx context.Context, userID uuid.UUID, input *entities.GenerateUserPasswordInput) (string, error) {
-	user, err := s.userRepo.FindByID(ctx, userID)
-	if err != nil {
-		return "", err
-	}
-	if user == nil {
-		return "", errorsutil.New(404, "user not found")
+// Login authenticates a user and returns a login response
+func (s *userService) Login(ctx context.Context, input *entities.LoginRequest) (*entities.LoginResponse, error) {
+	var user *entities.User
+	var err error
+
+	// Find user by email or phone
+	if input.PhoneNumber != "" {
+		user, err = s.userRepo.FindByPhoneNumber(ctx, input.PhoneNumber)
+	} else {
+		return nil, errorsutil.New(400, "phone number is required")
 	}
 
-	if input.Password == "" {
-		input.Password = GenerateRandomPassword(12)
-	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	user.Password = string(hashedPassword)
-	if err := s.userRepo.Update(ctx, user); err != nil {
-		return "", err
-	}
-
-	return "Success generate the password", nil
-}
-
-func GenerateRandomPassword(length int) string {
-	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
-}
-
-func (s *userService) Login(ctx context.Context, input *entities.LoginInput) (*entities.LoginResponse, error) {
-	user, err := s.userRepo.FindByUsername(ctx, input.Username)
 	if err != nil {
 		return nil, err
 	}
@@ -338,24 +333,126 @@ func (s *userService) Login(ctx context.Context, input *entities.LoginInput) (*e
 		return nil, errorsutil.New(404, "user not found")
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password))
+	// Verify password
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password))
 	if err != nil {
 		return nil, errorsutil.New(400, "password is incorrect")
 	}
 
+	// Check if user is active
+	if user.Status != entities.UserStatusActive {
+		return nil, errorsutil.New(403, "user account is inactive")
+	}
+
 	// Generate JWT token
-	token, err := s.authMiddleware.GenerateToken(user.UserID, user.OrganizationID, user.Username, int64(user.RoleID))
+	token, err := s.authMiddleware.GenerateToken(user)
 	if err != nil {
 		return nil, err
 	}
 
 	loginResponse := &entities.LoginResponse{
-		AccessToken:    token,
-		UserID:         user.UserID,
-		OrganizationID: user.OrganizationID,
-		Username:       user.Username,
-		RoleID:         user.RoleID,
+		AccessToken: token,
+		TokenType:   "Bearer",
+		ExpiresIn:   3600, // 1 hour
+		User:        user,
 	}
 
 	return loginResponse, nil
+}
+
+// ForgotPassword initiates password reset process
+func (s *userService) ForgotPassword(ctx context.Context, input *entities.ForgotPasswordRequest) error {
+	user, err := s.userRepo.FindByEmail(ctx, input.Email)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errorsutil.New(404, "user not found")
+	}
+
+	// TODO: Implement password reset token generation and email sending
+	// For now, just return success
+	return nil
+}
+
+// ResetPassword resets password using a token
+func (s *userService) ResetPassword(ctx context.Context, input *entities.ResetPasswordRequest) error {
+	// TODO: Implement token validation and password reset
+	// For now, just return success
+	return nil
+}
+
+// ChangePassword changes user's password
+func (s *userService) ChangePassword(ctx context.Context, input *entities.ChangePasswordRequest) error {
+	// TODO: Get current user from context
+	// For now, return not implemented error
+	return errorsutil.New(501, "change password not implemented")
+}
+
+// VerifyPhone verifies a phone number with a code
+func (s *userService) VerifyPhone(ctx context.Context, input *entities.VerifyPhoneRequest) error {
+	user, err := s.userRepo.FindByPhoneNumber(ctx, input.PhoneNumber)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errorsutil.New(404, "user not found")
+	}
+
+	// TODO: Implement phone verification logic
+	// For now, just mark as verified
+	now := time.Now()
+	user.PhoneVerifiedAt = &now
+
+	_, err = s.userRepo.Update(ctx, user)
+	return err
+}
+
+// ResendVerificationCode resends verification code for phone
+func (s *userService) ResendVerificationCode(ctx context.Context, input *entities.ResendVerificationCodeRequest) error {
+	user, err := s.userRepo.FindByPhoneNumber(ctx, input.PhoneNumber)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errorsutil.New(404, "user not found")
+	}
+
+	// TODO: Implement SMS sending logic
+	// For now, just return success
+	return nil
+}
+
+// VerifyEmail verifies an email with a token
+func (s *userService) VerifyEmail(ctx context.Context, input *entities.VerifyEmailRequest) error {
+	user, err := s.userRepo.FindByEmail(ctx, input.Email)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errorsutil.New(404, "user not found")
+	}
+
+	// TODO: Implement email verification logic
+	// For now, just mark as verified
+	now := time.Now()
+	user.EmailVerifiedAt = &now
+
+	_, err = s.userRepo.Update(ctx, user)
+	return err
+}
+
+// ResendVerificationEmail resends verification email
+func (s *userService) ResendVerificationEmail(ctx context.Context, input *entities.ResendVerificationEmailRequest) error {
+	user, err := s.userRepo.FindByEmail(ctx, input.Email)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errorsutil.New(404, "user not found")
+	}
+
+	// TODO: Implement email sending logic
+	// For now, just return success
+	return nil
 }

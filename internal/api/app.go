@@ -13,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	swaggofiles "github.com/swaggo/files"
 	ginswagger "github.com/swaggo/gin-swagger"
-	_ "github.com/vasst-id/vasst-expense-api/docs"
 	gintrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gin-gonic/gin"
 
 	grace "github.com/julofinance/grace/v2"
@@ -25,11 +24,8 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/vasst-id/vasst-expense-api/config"
-	adminHttpRouter "github.com/vasst-id/vasst-expense-api/internal/controller/http/v0"
-	orgHttpRouter "github.com/vasst-id/vasst-expense-api/internal/controller/http/v1"
-	"github.com/vasst-id/vasst-expense-api/internal/events/handlers"
+	httpRouter "github.com/vasst-id/vasst-expense-api/internal/controller/http/v1"
 	"github.com/vasst-id/vasst-expense-api/internal/middleware"
-	"github.com/vasst-id/vasst-expense-api/internal/pubsub"
 	"github.com/vasst-id/vasst-expense-api/internal/services"
 	"github.com/vasst-id/vasst-expense-api/internal/utils"
 )
@@ -96,49 +92,56 @@ func Run(config *config.Config) {
 	utils.SetLogger(logger)
 
 	// Initialize Google Pub/Sub client for webhook events
-	pubsubClient, err := pubsub.NewGooglePubSubClientWithCredentials(config.GoogleCloudProjectID, config.GoogleCloudCredentialsFile)
-	if err != nil {
-		log.Fatalf("error init pubsub client %s", err.Error())
-	}
-	defer pubsubClient.Close()
+	// pubsubClient, err := pubsub.NewGooglePubSubClientWithCredentials(config.GoogleCloudProjectID, config.GoogleCloudCredentialsFile)
+	// if err != nil {
+	// 	log.Fatalf("error init pubsub client %s", err.Error())
+	// }
+	// defer pubsubClient.Close()
 
 	// Initialize Google Cloud Storage service
-	storageService, err := services.NewGoogleStorageService(
-		config.GoogleCloudProjectID,
-		config.GoogleCloudBucketPrefix,
-		config.GoogleCloudCredentialsFile,
-		config.GoogleCloudRegion,
-	)
-	if err != nil {
-		log.Fatalf("error init google cloud storage service %s", err.Error())
-	}
+	// storageService, err := services.NewGoogleStorageService(
+	// 	config.GoogleCloudProjectID,
+	// 	config.GoogleCloudBucketPrefix,
+	// 	config.GoogleCloudCredentialsFile,
+	// 	config.GoogleCloudRegion,
+	// )
+	// if err != nil {
+	// 	log.Fatalf("error init google cloud storage service %s", err.Error())
+	// }
 
 	// services
 	authMiddleware := middleware.NewAuthMiddleware(config.JWTSecret)
-	organizationService := services.NewOrganizationService(repositories.NewOrganizationRepository(pg), storageService)
 	userService := services.NewUserService(repositories.NewUserRepository(pg), authMiddleware)
-	leadsService := services.NewLeadsService(repositories.NewLeadsRepository(pg))
-	contactService := services.NewContactService(repositories.NewContactRepository(pg))
-	conversationService := services.NewConversationService(repositories.NewConversationRepository(pg), repositories.NewMessageRepository(pg))
-
-	messageService := services.NewMessageService(repositories.NewMessageRepository(pg), repositories.NewConversationRepository(pg), conversationService, storageService)
-
-	openAIService, err := services.NewOpenAIService(config, messageService)
-	if err != nil {
-		log.Fatalf("error init openai service %s", err.Error())
-	}
-	geminiService, err := services.NewGeminiService(config, messageService)
-	if err != nil {
-		log.Fatalf("error init gemini service %s", err.Error())
-	}
-	whatsAppService, err := services.NewWhatsAppService(config, userService, organizationService, messageService, contactService, openAIService, geminiService, storageService)
-	if err != nil {
-		log.Fatalf("error init whatsapp service %s", err.Error())
-	}
+	workspaceService := services.NewWorkspaceService(repositories.NewWorkspaceRepository(pg))
+	accountService := services.NewAccountService(repositories.NewAccountRepository(pg))
+	bankService := services.NewBankService(repositories.NewBankRepository(pg))
+	currencyService := services.NewCurrencyService(repositories.NewCurrencyRepository(pg))
+	subscriptionPlanService := services.NewSubscriptionPlanService(repositories.NewSubscriptionPlanRepository(pg))
+	budgetService := services.NewBudgetService(repositories.NewBudgetRepository(pg))
+	categoryService := services.NewCategoryService(repositories.NewCategoryRepository(pg))
+	transactionService := services.NewTransactionService(repositories.NewTransactionRepository(pg), repositories.NewWorkspaceRepository(pg), repositories.NewAccountRepository(pg))
+	conversationService := services.NewConversationService(repositories.NewConversationRepository(pg), repositories.NewUserRepository(pg))
+	messageService := services.NewMessageService(repositories.NewMessageRepository(pg), repositories.NewConversationRepository(pg), repositories.NewUserRepository(pg))
+	taxonomyService := services.NewTaxonomyService(repositories.NewTaxonomyRepository(pg))
+	userTagsService := services.NewUserTagsService(repositories.NewUserTagsRepository(pg))
+	transactionTagsService := services.NewTransactionTagsService(repositories.NewTransactionTagsRepository(pg), repositories.NewUserTagsRepository(pg))
+	verificationCodeService := services.NewVerificationCodeService(repositories.NewVerificationCodeRepository(pg), repositories.NewUserRepository(pg))
+	// openAIService, err := services.NewOpenAIService(config, messageService)
+	// if err != nil {
+	// 	log.Fatalf("error init openai service %s", err.Error())
+	// }
+	// geminiService, err := services.NewGeminiService(config, messageService)
+	// if err != nil {
+	// 	log.Fatalf("error init gemini service %s", err.Error())
+	// }
+	// whatsAppService, err := services.NewWhatsAppService(config, userService, messageService)
+	// if err != nil {
+	// 	log.Fatalf("error init whatsapp service %s", err.Error())
+	// }
 
 	// Initialize unified webhook event handler
-	publisherAdapter := pubsub.NewPublisherAdapter(pubsubClient)
-	webhookEventHandler := handlers.NewWebhookEventHandler(publisherAdapter)
+	// publisherAdapter := pubsub.NewPublisherAdapter(pubsubClient)
+	// webhookEventHandler := handlers.NewWebhookEventHandler(publisherAdapter)
 
 	httpClient := httpclient.New(httpClientConfig(config))
 
@@ -152,7 +155,7 @@ func Run(config *config.Config) {
 	handler.Use(gzip.Gzip(gzip.DefaultCompression))
 	handler.Use(gin.Recovery())
 	handler.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000", "http://localhost:3001", "https://thegoodeggs.id"},
+		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000", "http://localhost:3001"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With"},
 		ExposeHeaders:    []string{"Content-Length", "Content-Type", "Authorization"},
@@ -191,26 +194,24 @@ func Run(config *config.Config) {
 
 	handler.GET("/health-check", gin.WrapF(healthCheck.HandlerFunc))
 
-	adminHttpRouter.NewRouter(handler, adminHttpRouter.Services{
-		Cfg:                 config,
-		OrganizationService: organizationService,
-		UserService:         userService,
-		LeadsService:        leadsService,
-		WebhookEventHandler: webhookEventHandler,
-		AuthMiddleware:      authMiddleware,
-	})
-
-	orgHttpRouter.NewRouter(handler, orgHttpRouter.Services{
-		Cfg:                 config,
-		OrganizationService: organizationService,
-		UserService:         userService,
-		AuthMiddleware:      authMiddleware,
-		ContactService:      contactService,
-		ConversationService: conversationService,
-		MessageService:      messageService,
-		WhatsAppService:     whatsAppService,
-		OpenAIService:       openAIService,
-		GeminiService:       geminiService,
+	httpRouter.NewRouter(handler, httpRouter.Services{
+		Cfg:                     config,
+		UserService:             userService,
+		WorkspaceService:        workspaceService,
+		AccountService:          accountService,
+		BankService:             bankService,
+		CurrencyService:         currencyService,
+		SubscriptionPlanService: subscriptionPlanService,
+		BudgetService:           budgetService,
+		AuthMiddleware:          authMiddleware,
+		CategoryService:         categoryService,
+		TransactionService:      transactionService,
+		ConversationService:     conversationService,
+		MessageService:          messageService,
+		TaxonomyService:         taxonomyService,
+		UserTagsService:         userTagsService,
+		TransactionTagsService:  transactionTagsService,
+		VerificationCodeService: verificationCodeService,
 	})
 
 	fmt.Printf("Starting server on port %s\n", config.Port)

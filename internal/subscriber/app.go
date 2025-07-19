@@ -1,7 +1,6 @@
 package subscriber
 
 import (
-	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -11,15 +10,10 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/vasst-id/vasst-expense-api/config"
-	"github.com/vasst-id/vasst-expense-api/internal/entities"
-	"github.com/vasst-id/vasst-expense-api/internal/events/handlers"
 	"github.com/vasst-id/vasst-expense-api/internal/pubsub"
-	"github.com/vasst-id/vasst-expense-api/internal/repositories"
-	"github.com/vasst-id/vasst-expense-api/internal/services"
 	"github.com/vasst-id/vasst-expense-api/internal/utils"
 	logs "github.com/vasst-id/vasst-expense-api/internal/utils/logger"
 	"github.com/vasst-id/vasst-expense-api/internal/utils/postgres"
-	"github.com/vasst-id/vasst-expense-api/internal/workers"
 )
 
 const (
@@ -71,79 +65,75 @@ func Run(config *config.Config) {
 	defer pubsubClient.Close()
 
 	// Create topics if they don't exist
-	ctx := context.Background()
-	topics := []string{
-		entities.TopicWebhookReceived,
-		entities.TopicMessageCreated,
-		entities.TopicAIResponseReceived,
-		entities.TopicMessageDelivery,
-	}
+	// ctx := context.Background()
+	// topics := []string{
+	// 	entities.TopicWebhookReceived,
+	// 	entities.TopicMessageCreated,
+	// 	entities.TopicAIResponseReceived,
+	// 	entities.TopicMessageDelivery,
+	// }
 
-	for _, topic := range topics {
-		if err := pubsubClient.CreateTopicIfNotExists(ctx, topic); err != nil {
-			log.Fatalf("error creating topic %s: %s", topic, err.Error())
-		}
-	}
+	// for _, topic := range topics {
+	// 	if err := pubsubClient.CreateTopicIfNotExists(ctx, topic); err != nil {
+	// 		log.Fatalf("error creating topic %s: %s", topic, err.Error())
+	// 	}
+	// }
 
 	// Initialize Google Cloud Storage service
-	storageService, err := services.NewGoogleStorageService(
-		config.GoogleCloudProjectID,
-		config.GoogleCloudBucketPrefix,
-		config.GoogleCloudCredentialsFile,
-		config.GoogleCloudRegion,
-	)
-	if err != nil {
-		log.Fatalf("error init google cloud storage service %s", err.Error())
-	}
+	// storageService, err := services.NewGoogleStorageService(
+	// 	config.GoogleCloudProjectID,
+	// 	config.GoogleCloudBucketPrefix,
+	// 	config.GoogleCloudCredentialsFile,
+	// 	config.GoogleCloudRegion,
+	// )
+	// if err != nil {
+	// 	log.Fatalf("error init google cloud storage service %s", err.Error())
+	// }
 
 	// Initialize services
-	organizationService := services.NewOrganizationService(repositories.NewOrganizationRepository(pg), storageService)
-	contactService := services.NewContactService(repositories.NewContactRepository(pg))
-	conversationService := services.NewConversationService(repositories.NewConversationRepository(pg), repositories.NewMessageRepository(pg))
-	messageService := services.NewMessageService(repositories.NewMessageRepository(pg), repositories.NewConversationRepository(pg), conversationService, storageService)
+	// messageService := services.NewMessageService(repositories.NewMessageRepository(pg), storageService)
 
-	geminiService, err := services.NewGeminiService(config, messageService)
-	if err != nil {
-		log.Fatalf("error init gemini service %s", err.Error())
-	}
+	// geminiService, err := services.NewGeminiService(config, messageService)
+	// if err != nil {
+	// 	log.Fatalf("error init gemini service %s", err.Error())
+	// }
 
-	openAIService, err := services.NewOpenAIService(config, messageService)
-	if err != nil {
-		log.Fatalf("error init openai service %s", err.Error())
-	}
+	// openAIService, err := services.NewOpenAIService(config, messageService)
+	// if err != nil {
+	// 	log.Fatalf("error init openai service %s", err.Error())
+	// }
 
-	userService := services.NewUserService(repositories.NewUserRepository(pg), nil) // TODO: Add auth middleware if needed
-	whatsAppMediaService := services.NewWhatsAppMediaService(config)
-	whatsAppService, err := services.NewWhatsAppService(config, userService, organizationService, messageService, contactService, openAIService, geminiService, storageService)
-	if err != nil {
-		log.Fatalf("error init whatsapp service %s", err.Error())
-	}
+	// userService := services.NewUserService(repositories.NewUserRepository(pg), nil) // TODO: Add auth middleware if needed
+	// whatsAppMediaService := services.NewWhatsAppMediaService(config)
+	// whatsAppService, err := services.NewWhatsAppService(config, userService, messageService, openAIService, geminiService, storageService)
+	// if err != nil {
+	// 	log.Fatalf("error init whatsapp service %s", err.Error())
+	// }
 
-	// Initialize event handlers
-	messageEventHandler := handlers.NewMessageEventHandler(pubsubClient, messageService, conversationService, contactService, userService, whatsAppMediaService, whatsAppService, storageService, organizationService, config, logger)
-	aiEventHandler := handlers.NewAIEventHandler(pubsubClient, geminiService, messageService, contactService, organizationService, whatsAppService, config, logger)
+	// // Initialize event handlers
+	// messageEventHandler := handlers.NewMessageEventHandler(pubsubClient, messageService, userService, whatsAppMediaService, whatsAppService, storageService, organizationService, config, logger)
+	// aiEventHandler := handlers.NewAIEventHandler(pubsubClient, geminiService, messageService, whatsAppService)
 
-	// Initialize workers
-	messageWorker := workers.NewMessageWorker(pubsubClient, messageEventHandler, logger)
-	aiWorker := workers.NewAIWorker(pubsubClient, aiEventHandler, logger)
-	messageDeliveryWorker := workers.NewMessageDeliveryWorker(pubsubClient, messageService, conversationService, contactService, whatsAppService, config, logger)
+	// // Initialize workers
+	// messageWorker := workers.NewMessageWorker(pubsubClient, messageEventHandler)
+	// aiWorker := workers.NewAIWorker(pubsubClient, aiEventHandler)
 
 	// Start workers
 	logger.Info().Msg("Starting event-driven workers...")
 
-	if err := messageWorker.Start(); err != nil {
-		log.Fatalf("error starting message worker: %s", err.Error())
-	}
+	// if err := messageWorker.Start(); err != nil {
+	// 	log.Fatalf("error starting message worker: %s", err.Error())
+	// }
 
-	if err := aiWorker.Start(); err != nil {
-		log.Fatalf("error starting AI worker: %s", err.Error())
-	}
+	// if err := aiWorker.Start(); err != nil {
+	// 	log.Fatalf("error starting AI worker: %s", err.Error())
+	// }
 
-	if err := messageDeliveryWorker.Start(); err != nil {
-		log.Fatalf("error starting message delivery worker: %s", err.Error())
-	}
+	// if err := messageDeliveryWorker.Start(); err != nil {
+	// 	log.Fatalf("error starting message delivery worker: %s", err.Error())
+	// }
 
-	logger.Info().Msg("All workers started successfully")
+	// logger.Info().Msg("All workers started successfully")
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
@@ -156,20 +146,20 @@ func Run(config *config.Config) {
 	var wg sync.WaitGroup
 	wg.Add(3)
 
-	go func() {
-		defer wg.Done()
-		messageWorker.Stop()
-	}()
+	// go func() {
+	// 	defer wg.Done()
+	// 	messageWorker.Stop()
+	// }()
 
-	go func() {
-		defer wg.Done()
-		aiWorker.Stop()
-	}()
+	// go func() {
+	// 	defer wg.Done()
+	// 	aiWorker.Stop()
+	// }()
 
-	go func() {
-		defer wg.Done()
-		messageDeliveryWorker.Stop()
-	}()
+	// go func() {
+	// 	defer wg.Done()
+	// 	messageDeliveryWorker.Stop()
+	// }()
 
 	// Wait for workers to stop with timeout
 	done := make(chan struct{})

@@ -30,7 +30,6 @@ type WebhookMessage struct {
 	WhatsAppMessageID string                 `json:"whatsapp_message_id"`
 	MessageType       int                    `json:"message_type"`
 	Metadata          map[string]interface{} `json:"metadata"`
-	Attachments       []Attachment           `json:"attachments"`
 }
 
 // WebhookReceivedEvent represents a webhook event for Pub/Sub

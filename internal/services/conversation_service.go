@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/google/uuid"
@@ -14,324 +13,220 @@ import (
 //go:generate mockgen -source=conversation_service.go -package=mock -destination=mock/conversation_service_mock.go
 type (
 	ConversationService interface {
-		CreateConversation(ctx context.Context, input *entities.CreateConversationInput) (*entities.Conversation, error)
-		UpdateConversation(ctx context.Context, conversationID, organizationID uuid.UUID, input *entities.UpdateConversationInput) (*entities.Conversation, error)
-		UpdateConversationLastMessage(ctx context.Context, conversationID uuid.UUID, input *entities.UpdateConversationLastMessageInput) error
-		DeleteConversation(ctx context.Context, conversationID, organizationID uuid.UUID) error
-
-		// Organization-scoped operations
-		GetConversationByID(ctx context.Context, conversationID, organizationID uuid.UUID) (*entities.Conversation, error)
-		GetConversationDetail(ctx context.Context, conversationID, organizationID uuid.UUID, messageLimit, messageOffset int) (*entities.ConversationDetailResponse, error)
-		ListConversationsByOrganization(ctx context.Context, organizationID uuid.UUID, limit, offset int) ([]*entities.ConversationListResponse, error)
-		ListConversationsByOrganizationWithFilters(ctx context.Context, organizationID uuid.UUID, status, priority *int, isActive *bool, limit, offset int) ([]*entities.ConversationListResponse, error)
-
-		// Find active conversation for specific parameters
-		GetActiveConversation(ctx context.Context, organizationID, userID, contactID uuid.UUID, mediumID int) (*entities.Conversation, error)
-
-		// Filtered queries (organization-scoped)
-		GetConversationsByUserID(ctx context.Context, organizationID, userID uuid.UUID, limit, offset int) ([]*entities.ConversationListResponse, error)
-		GetConversationsByContactID(ctx context.Context, organizationID, contactID uuid.UUID, limit, offset int) ([]*entities.ConversationListResponse, error)
-		GetConversationsByStatus(ctx context.Context, organizationID uuid.UUID, status int, limit, offset int) ([]*entities.ConversationListResponse, error)
-		GetConversationsByPriority(ctx context.Context, organizationID uuid.UUID, priority int, limit, offset int) ([]*entities.ConversationListResponse, error)
-
-		// Count operations
-		GetConversationCountByOrganization(ctx context.Context, organizationID uuid.UUID) (int, error)
+		CreateConversation(ctx context.Context, userID uuid.UUID, input *entities.CreateConversationRequest) (*entities.Conversation, error)
+		UpdateConversation(ctx context.Context, userID uuid.UUID, conversationID uuid.UUID, input *entities.UpdateConversationRequest) (*entities.Conversation, error)
+		DeleteConversation(ctx context.Context, userID uuid.UUID, conversationID uuid.UUID) error
+		GetConversationsByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*entities.Conversation, error)
+		GetActiveConversationsByUserID(ctx context.Context, userID uuid.UUID) ([]*entities.Conversation, error)
+		GetConversationByID(ctx context.Context, userID uuid.UUID, conversationID uuid.UUID) (*entities.Conversation, error)
+		GetSimpleConversationsByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*entities.ConversationSimple, int64, error)
+		GetOrCreateConversationByChannel(ctx context.Context, userID uuid.UUID, channel string) (*entities.Conversation, error)
 	}
 
 	conversationService struct {
 		conversationRepo repositories.ConversationRepository
-		messageRepo      repositories.MessageRepository
+		userRepo         repositories.UserRepository
 	}
 )
 
 // NewConversationService creates a new conversation service
-func NewConversationService(conversationRepo repositories.ConversationRepository, messageRepo repositories.MessageRepository) ConversationService {
+func NewConversationService(
+	conversationRepo repositories.ConversationRepository,
+	userRepo repositories.UserRepository,
+) ConversationService {
 	return &conversationService{
 		conversationRepo: conversationRepo,
-		messageRepo:      messageRepo,
+		userRepo:         userRepo,
 	}
 }
 
 // CreateConversation creates a new conversation
-func (s *conversationService) CreateConversation(ctx context.Context, input *entities.CreateConversationInput) (*entities.Conversation, error) {
-	// Validate input
-	if input.OrganizationID == uuid.Nil {
-		return nil, errors.New("organization ID is required")
+func (s *conversationService) CreateConversation(ctx context.Context, userID uuid.UUID, input *entities.CreateConversationRequest) (*entities.Conversation, error) {
+	// Validate required fields
+	if input.Channel == "" {
+		return nil, errors.New("channel is required")
 	}
 
-	if input.UserID == uuid.Nil {
-		return nil, errors.New("user ID is required")
-	}
-
-	if input.ContactID == uuid.Nil {
-		return nil, errors.New("contact ID is required")
-	}
-
-	if input.MediumID == 0 {
-		return nil, errors.New("medium ID is required")
-	}
-
-	// Check if there's already an active conversation for these parameters
-	existingConversation, err := s.conversationRepo.FindActiveByOrganizationUserContactMedium(ctx, input.OrganizationID, input.UserID, input.ContactID, input.MediumID)
+	// Verify user exists
+	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-
-	if existingConversation != nil {
-		return existingConversation, nil // Return existing conversation instead of creating new one
-	}
-
-	// Prepare AI config
-	var aiConfigJSON json.RawMessage
-	if input.AIConfig != nil {
-		aiConfigJSON, err = json.Marshal(input.AIConfig)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		aiConfigJSON = json.RawMessage("{}")
-	}
-
-	// Prepare metadata
-	var metadataJSON json.RawMessage
-	if input.Metadata != nil {
-		metadataJSON, err = json.Marshal(input.Metadata)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		metadataJSON = json.RawMessage("{}")
-	}
-
-	// Set default values
-	status := input.Status
-	if status == 0 {
-		status = int(entities.ConversationStatusOpen)
-	}
-
-	priority := input.Priority
-	if priority == 0 {
-		priority = int(entities.ConversationPriorityLow)
-	}
-
-	aiEnabled := input.AIEnabled
-	if !aiEnabled {
-		aiEnabled = true // Default to true
+	if user == nil {
+		return nil, errorsutil.New(404, "user not found")
 	}
 
 	// Create new conversation
 	conversation := &entities.Conversation{
-		ConversationID:      uuid.New(),
-		OrganizationID:      input.OrganizationID,
-		UserID:              input.UserID,
-		ContactID:           input.ContactID,
-		MediumID:            input.MediumID,
-		Status:              status,
-		Priority:            priority,
-		AIEnabled:           aiEnabled,
-		AIConfig:            aiConfigJSON,
-		Metadata:            metadataJSON,
-		LastMessageByID:     input.LastMessageByID,
-		LastMessageByType:   input.LastMessageByType,
-		LastMessageByName:   input.LastMessageByName,
-		LastMessageContent:  input.LastMessageContent,
-		LastMessageTypeID:   input.LastMessageTypeID,
-		LastMessageMediaURL: input.LastMessageMediaURL,
-		IsActive:            true,
-		IsArchived:          false,
-		IsDeleted:           false,
+		ConversationID: uuid.New(),
+		UserID:         userID,
+		Channel:        input.Channel,
+		IsActive:       true,
+		Context:        input.Context,
+		Metadata:       input.Metadata,
 	}
 
-	if err := s.conversationRepo.Create(ctx, conversation); err != nil {
+	// Create the conversation - the repository will populate the struct with the actual data from DB
+	createdConversation, err := s.conversationRepo.Create(ctx, conversation)
+	if err != nil {
 		return nil, err
 	}
 
-	// Deactivate other conversations for the same parameters
-	if err := s.conversationRepo.DeactivateOtherConversations(ctx, input.OrganizationID, input.UserID, input.ContactID, input.MediumID, conversation.ConversationID); err != nil {
-		// Log error but don't fail the creation
-		// TODO: Add proper logging
-	}
-
-	return conversation, nil
+	// Return the conversation with data populated from the database
+	return &createdConversation, nil
 }
 
 // UpdateConversation updates an existing conversation
-func (s *conversationService) UpdateConversation(ctx context.Context, conversationID, organizationID uuid.UUID, input *entities.UpdateConversationInput) (*entities.Conversation, error) {
-	// Check if conversation exists and belongs to organization
-	existingConversation, err := s.conversationRepo.FindByID(ctx, conversationID, organizationID)
+func (s *conversationService) UpdateConversation(ctx context.Context, userID uuid.UUID, conversationID uuid.UUID, input *entities.UpdateConversationRequest) (*entities.Conversation, error) {
+	// Get existing conversation and verify ownership
+	existingConversation, err := s.conversationRepo.FindByID(ctx, conversationID)
 	if err != nil {
 		return nil, err
 	}
-
 	if existingConversation == nil {
 		return nil, errorsutil.New(404, "conversation not found")
 	}
-
-	// Update conversation fields
-	if input.UserID != uuid.Nil {
-		existingConversation.UserID = input.UserID
-	}
-	if input.MediumID != 0 {
-		existingConversation.MediumID = input.MediumID
-	}
-	if input.Status != nil {
-		existingConversation.Status = *input.Status
-	}
-	if input.Priority != nil {
-		existingConversation.Priority = *input.Priority
-	}
-	if input.AIEnabled != nil {
-		existingConversation.AIEnabled = *input.AIEnabled
-	}
-	if input.AIConfig != nil {
-		aiConfigJSON, err := json.Marshal(input.AIConfig)
-		if err != nil {
-			return nil, err
-		}
-		existingConversation.AIConfig = aiConfigJSON
-	}
-	if input.Metadata != nil {
-		metadataJSON, err := json.Marshal(input.Metadata)
-		if err != nil {
-			return nil, err
-		}
-		existingConversation.Metadata = metadataJSON
-	}
-	if input.IsActive != nil {
-		existingConversation.IsActive = *input.IsActive
-	}
-	if input.IsArchived != nil {
-		existingConversation.IsArchived = *input.IsArchived
+	if existingConversation.UserID != userID {
+		return nil, errorsutil.New(403, "access denied")
 	}
 
-	if err := s.conversationRepo.Update(ctx, existingConversation); err != nil {
+	// Validate required fields
+	if input.Channel == "" {
+		return nil, errors.New("channel is required")
+	}
+
+	// Update fields
+	existingConversation.Channel = input.Channel
+	existingConversation.Context = input.Context
+	existingConversation.Metadata = input.Metadata
+	existingConversation.IsActive = input.IsActive
+
+	// Update the conversation - the repository will populate the struct with the actual data from DB
+	updatedConversation, err := s.conversationRepo.Update(ctx, existingConversation)
+	if err != nil {
 		return nil, err
 	}
 
-	return existingConversation, nil
+	// Return the conversation with data populated from the database
+	return &updatedConversation, nil
 }
 
-// UpdateConversationLastMessage updates last message information
-func (s *conversationService) UpdateConversationLastMessage(ctx context.Context, conversationID uuid.UUID, input *entities.UpdateConversationLastMessageInput) error {
-	return s.conversationRepo.UpdateLastMessage(ctx, conversationID, input)
-}
-
-// DeleteConversation deletes a conversation by its ID
-func (s *conversationService) DeleteConversation(ctx context.Context, conversationID, organizationID uuid.UUID) error {
-	// Check if conversation exists and belongs to organization
-	existingConversation, err := s.conversationRepo.FindByID(ctx, conversationID, organizationID)
+// DeleteConversation deletes a conversation (soft delete)
+func (s *conversationService) DeleteConversation(ctx context.Context, userID uuid.UUID, conversationID uuid.UUID) error {
+	// Get existing conversation and verify ownership
+	existingConversation, err := s.conversationRepo.FindByID(ctx, conversationID)
 	if err != nil {
 		return err
 	}
-
 	if existingConversation == nil {
 		return errorsutil.New(404, "conversation not found")
+	}
+	if existingConversation.UserID != userID {
+		return errorsutil.New(403, "access denied")
 	}
 
 	return s.conversationRepo.Delete(ctx, conversationID)
 }
 
-// GetConversationByID returns a conversation by its ID (organization-scoped)
-func (s *conversationService) GetConversationByID(ctx context.Context, conversationID, organizationID uuid.UUID) (*entities.Conversation, error) {
-	conversation, err := s.conversationRepo.FindByID(ctx, conversationID, organizationID)
+// GetConversationsByUserID returns conversations for a user with pagination
+func (s *conversationService) GetConversationsByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*entities.Conversation, error) {
+	// Verify user exists
+	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	if user == nil {
+		return nil, errorsutil.New(404, "user not found")
+	}
 
+	return s.conversationRepo.FindByUserID(ctx, userID, limit, offset)
+}
+
+// GetActiveConversationsByUserID returns all active conversations for a user
+func (s *conversationService) GetActiveConversationsByUserID(ctx context.Context, userID uuid.UUID) ([]*entities.Conversation, error) {
+	// Verify user exists
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, errorsutil.New(404, "user not found")
+	}
+
+	return s.conversationRepo.FindActiveByUserID(ctx, userID)
+}
+
+// GetConversationByID returns a conversation by ID (with user ownership verification)
+func (s *conversationService) GetConversationByID(ctx context.Context, userID uuid.UUID, conversationID uuid.UUID) (*entities.Conversation, error) {
+	conversation, err := s.conversationRepo.FindByID(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
 	if conversation == nil {
 		return nil, errorsutil.New(404, "conversation not found")
 	}
-
+	if conversation.UserID != userID {
+		return nil, errorsutil.New(403, "access denied")
+	}
 	return conversation, nil
 }
 
-// GetConversationDetail returns a conversation with messages
-func (s *conversationService) GetConversationDetail(ctx context.Context, conversationID, organizationID uuid.UUID, messageLimit, messageOffset int) (*entities.ConversationDetailResponse, error) {
-	// Get conversation
-	conversation, err := s.conversationRepo.FindByID(ctx, conversationID, organizationID)
+// GetSimpleConversationsByUserID returns simplified conversations with pagination and total count
+func (s *conversationService) GetSimpleConversationsByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*entities.ConversationSimple, int64, error) {
+	// Verify user exists
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if user == nil {
+		return nil, 0, errorsutil.New(404, "user not found")
+	}
+
+	// Get conversations
+	conversations, err := s.conversationRepo.FindSimpleByUserID(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Get total count
+	totalCount, err := s.conversationRepo.CountByUserID(ctx, userID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return conversations, totalCount, nil
+}
+
+// GetOrCreateConversationByChannel gets an existing conversation by channel or creates a new one
+func (s *conversationService) GetOrCreateConversationByChannel(ctx context.Context, userID uuid.UUID, channel string) (*entities.Conversation, error) {
+	// Validate required fields
+	if channel == "" {
+		return nil, errors.New("channel is required")
+	}
+
+	// Verify user exists
+	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-
-	if conversation == nil {
-		return nil, errorsutil.New(404, "conversation not found")
+	if user == nil {
+		return nil, errorsutil.New(404, "user not found")
 	}
 
-	// Set default message limit if not provided
-	if messageLimit == 0 {
-		messageLimit = 50
-	}
-
-	// Get messages for this conversation
-	messages, err := s.messageRepo.FindByConversationAndOrganization(ctx, conversationID, organizationID, messageLimit, messageOffset)
+	// Try to find existing conversation by channel
+	existingConversation, err := s.conversationRepo.FindByUserIDAndChannel(ctx, userID, channel)
 	if err != nil {
 		return nil, err
 	}
-
-	// Check if there are more messages
-	hasMoreMessages := false
-	if len(messages) == messageLimit {
-		// Check if there's one more message
-		nextMessages, err := s.messageRepo.FindByConversationAndOrganization(ctx, conversationID, organizationID, 1, messageOffset+messageLimit)
-		if err == nil && len(nextMessages) > 0 {
-			hasMoreMessages = true
-		}
+	if existingConversation != nil {
+		return existingConversation, nil
 	}
 
-	// Count total messages
-	totalMessages := len(messages) + messageOffset
-	if hasMoreMessages {
-		// Get total count (this is a simplified approach)
-		allMessages, err := s.messageRepo.FindByConversationAndOrganization(ctx, conversationID, organizationID, 1000, 0)
-		if err == nil {
-			totalMessages = len(allMessages)
-		}
+	// Create new conversation if none exists
+	input := &entities.CreateConversationRequest{
+		UserID:  userID,
+		Channel: channel,
 	}
 
-	return &entities.ConversationDetailResponse{
-		Conversation:    conversation,
-		Messages:        messages,
-		TotalMessages:   totalMessages,
-		HasMoreMessages: hasMoreMessages,
-	}, nil
-}
-
-// ListConversationsByOrganization returns conversations for an organization
-func (s *conversationService) ListConversationsByOrganization(ctx context.Context, organizationID uuid.UUID, limit, offset int) ([]*entities.ConversationListResponse, error) {
-	return s.conversationRepo.ListByOrganization(ctx, organizationID, limit, offset)
-}
-
-// ListConversationsByOrganizationWithFilters returns conversations with filters
-func (s *conversationService) ListConversationsByOrganizationWithFilters(ctx context.Context, organizationID uuid.UUID, status, priority *int, isActive *bool, limit, offset int) ([]*entities.ConversationListResponse, error) {
-	return s.conversationRepo.ListByOrganizationWithFilters(ctx, organizationID, status, priority, isActive, limit, offset)
-}
-
-// GetActiveConversation finds the active conversation for specific parameters
-func (s *conversationService) GetActiveConversation(ctx context.Context, organizationID, userID, contactID uuid.UUID, mediumID int) (*entities.Conversation, error) {
-	return s.conversationRepo.FindActiveByOrganizationUserContactMedium(ctx, organizationID, userID, contactID, mediumID)
-}
-
-// GetConversationsByUserID returns conversations for a user (organization-scoped)
-func (s *conversationService) GetConversationsByUserID(ctx context.Context, organizationID, userID uuid.UUID, limit, offset int) ([]*entities.ConversationListResponse, error) {
-	return s.conversationRepo.FindByUserID(ctx, organizationID, userID, limit, offset)
-}
-
-// GetConversationsByContactID returns conversations for a contact (organization-scoped)
-func (s *conversationService) GetConversationsByContactID(ctx context.Context, organizationID, contactID uuid.UUID, limit, offset int) ([]*entities.ConversationListResponse, error) {
-	return s.conversationRepo.FindByContactID(ctx, organizationID, contactID, limit, offset)
-}
-
-// GetConversationsByStatus returns conversations by status (organization-scoped)
-func (s *conversationService) GetConversationsByStatus(ctx context.Context, organizationID uuid.UUID, status int, limit, offset int) ([]*entities.ConversationListResponse, error) {
-	return s.conversationRepo.FindByStatus(ctx, organizationID, status, limit, offset)
-}
-
-// GetConversationsByPriority returns conversations by priority (organization-scoped)
-func (s *conversationService) GetConversationsByPriority(ctx context.Context, organizationID uuid.UUID, priority int, limit, offset int) ([]*entities.ConversationListResponse, error) {
-	return s.conversationRepo.FindByPriority(ctx, organizationID, priority, limit, offset)
-}
-
-// GetConversationCountByOrganization returns total count of conversations for an organization
-func (s *conversationService) GetConversationCountByOrganization(ctx context.Context, organizationID uuid.UUID) (int, error) {
-	return s.conversationRepo.CountByOrganization(ctx, organizationID)
+	return s.CreateConversation(ctx, userID, input)
 }

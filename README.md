@@ -7,7 +7,7 @@ This is the backend API for VASST Communication agents application, built with G
 The API documentation is available through Swagger UI at `/swagger/index.html` when running the server.
 
 ### Base URL
-- Development: `http://localhost:8080/v1`
+- Development: `http://localhost:8888/v1`
 - Production: `https://api.vasst.id/v1`
 
 ### Authentication

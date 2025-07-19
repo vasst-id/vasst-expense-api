@@ -2,7 +2,6 @@ package v1
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -22,57 +21,26 @@ func newUserRoutes(handler *gin.RouterGroup, userService services.UserService, a
 		auth:        auth,
 	}
 
-	// Organization-scoped endpoints
-	org := handler.Group("/users")
+	// User management endpoints
+	users := handler.Group("/users")
 	{
-		org.GET("", r.ListUsersByOrganization)
-		org.GET("/:id", r.GetUserByIDAndOrganization)
-		org.GET("/phone/:phone", r.GetUserByPhoneNumberAndOrganization)
-		org.GET("/username/:username", r.GetUserByUsernameAndOrganization)
-		org.POST("/login", r.Login)
-	}
-}
-
-// @Summary Get all users
-// @Description Get a list of users with optional filtering
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param limit query int false "Limit for pagination"
-// @Param offset query int false "Offset for pagination"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /users [get]
-func (r *userRoutes) ListAllUsers(c *gin.Context) {
-	limit := 10
-	offset := 0
-
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if val, err := strconv.Atoi(limitStr); err == nil {
-			limit = val
-		}
+		users.GET("/", r.auth.AuthRequired(), r.GetUserByID)
+		users.PUT("/", r.auth.AuthRequired(), r.UpdateUser)
 	}
 
-	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if val, err := strconv.Atoi(offsetStr); err == nil {
-			offset = val
-		}
+	// Authentication endpoints
+	authRoutes := handler.Group("/auth")
+	{
+		authRoutes.POST("/login", r.Login)
+		authRoutes.POST("/register", r.Register)
+		authRoutes.POST("/forgot-password", r.ForgotPassword)
+		authRoutes.POST("/reset-password", r.ResetPassword)
+		authRoutes.POST("/change-password", r.ChangePassword)
+		authRoutes.POST("/verify-phone", r.VerifyPhone)
+		authRoutes.POST("/resend-verification-code", r.ResendVerificationCode)
+		authRoutes.POST("/verify-email", r.VerifyEmail)
+		authRoutes.POST("/resend-verification-email", r.ResendVerificationEmail)
 	}
-
-	users, err := r.userService.ListAllUsers(c.Request.Context(), limit, offset)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, &entities.ApiResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, &entities.ApiResponse{
-		Success: true,
-		Data:    users,
-	})
 }
 
 // @Summary Get user by ID
@@ -87,13 +55,9 @@ func (r *userRoutes) ListAllUsers(c *gin.Context) {
 // @Failure 500 {object} entities.ApiResponse
 // @Router /users/{id} [get]
 func (r *userRoutes) GetUserByID(c *gin.Context) {
-	userID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
-			Success: false,
-			Error:   "invalid user ID format",
-		})
-		return
+	userID, ok := GetAuthenticatedUserID(c)
+	if !ok {
+		return // Error response already sent by GetAuthenticatedUserID
 	}
 
 	user, err := r.userService.GetUserByID(c.Request.Context(), userID)
@@ -120,12 +84,12 @@ func (r *userRoutes) GetUserByID(c *gin.Context) {
 // @Tags users
 // @Accept json
 // @Produce json
-// @Param input body struct{ PhoneNumber string `json:"phone_number" binding:"required"`; FullName string `json:"full_name" binding:"required"` } true "User details"
+// @Param input body entities.CreateUserInput true "User details"
 // @Success 201 {object} entities.ApiResponse
 // @Failure 400 {object} entities.ApiResponse
 // @Failure 500 {object} entities.ApiResponse
 // @Router /users [post]
-func (r *userRoutes) CreateUser(c *gin.Context) {
+func (r *userRoutes) Register(c *gin.Context) {
 	var input entities.CreateUserInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
@@ -135,11 +99,19 @@ func (r *userRoutes) CreateUser(c *gin.Context) {
 		return
 	}
 
-	user, err := r.userService.CreateUser(c.Request.Context(), &input)
+	loginResponse, err := r.userService.CreateUser(c.Request.Context(), &input)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if err.Error() == "user with this phone number already exists" || err.Error() == "user with this username already exists" {
+		if err.Error() == "user with this email already exists" ||
+			err.Error() == "user with this phone number already exists" {
 			status = http.StatusConflict
+		} else if err.Error() == "password must be exactly 6 digits" ||
+			err.Error() == "email is required" ||
+			err.Error() == "phone number is required" ||
+			err.Error() == "first name is required" ||
+			err.Error() == "last name is required" ||
+			err.Error() == "password is required" {
+			status = http.StatusBadRequest
 		}
 		c.JSON(status, &entities.ApiResponse{
 			Success: false,
@@ -150,7 +122,8 @@ func (r *userRoutes) CreateUser(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, &entities.ApiResponse{
 		Success: true,
-		Data:    user,
+		Data:    loginResponse,
+		Message: "User registered successfully",
 	})
 }
 
@@ -160,7 +133,7 @@ func (r *userRoutes) CreateUser(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param id path string true "User ID"
-// @Param input body struct{ PhoneNumber string `json:"phone_number" binding:"required"`; FullName string `json:"full_name" binding:"required"` } true "Updated user details"
+// @Param input body entities.UpdateUserInput true "Updated user details"
 // @Success 200 {object} entities.ApiResponse
 // @Failure 400 {object} entities.ApiResponse
 // @Failure 404 {object} entities.ApiResponse
@@ -190,7 +163,8 @@ func (r *userRoutes) UpdateUser(c *gin.Context) {
 		status := http.StatusInternalServerError
 		if err.Error() == "user not found" {
 			status = http.StatusNotFound
-		} else if err.Error() == "phone number already in use" || err.Error() == "username already in use" {
+		} else if err.Error() == "phone number already in use" ||
+			err.Error() == "email already in use" {
 			status = http.StatusConflict
 		}
 		c.JSON(status, &entities.ApiResponse{
@@ -206,253 +180,20 @@ func (r *userRoutes) UpdateUser(c *gin.Context) {
 	})
 }
 
-// @Summary Delete a user
-// @Description Delete a user by their ID
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param id path string true "User ID"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 404 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /users/{id} [delete]
-func (r *userRoutes) DeleteUser(c *gin.Context) {
-	userID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
-			Success: false,
-			Error:   "invalid user ID format",
-		})
-		return
-	}
-
-	err = r.userService.DeleteUser(c.Request.Context(), userID)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, &entities.ApiResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, &entities.ApiResponse{
-		Success: true,
-		Data:    "User deleted successfully",
-	})
-}
-
-// @Summary Get user by phone number
-// @Description Get a user by their phone number
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param phone path string true "Phone Number"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 404 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /users/phone/{phone} [get]
-func (r *userRoutes) GetUserByPhoneNumber(c *gin.Context) {
-	phoneNumber := c.Param("phone")
-	if phoneNumber == "" {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
-			Success: false,
-			Error:   "phone number is required",
-		})
-		return
-	}
-
-	user, err := r.userService.GetUserByPhoneNumber(c.Request.Context(), phoneNumber)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, &entities.ApiResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, &entities.ApiResponse{
-		Success: true,
-		Data:    user,
-	})
-}
-
-func (r *userRoutes) GetUserByUsername(c *gin.Context) {
-	username := c.Param("username")
-	if username == "" {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "username is required"})
-		return
-	}
-	user, err := r.userService.GetUserByUsername(c.Request.Context(), username)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, &entities.ApiResponse{Success: false, Error: err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, &entities.ApiResponse{Success: true, Data: user})
-}
-
-// @Summary Get users by organization
-// @Description Get a list of users for a specific organization
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param orgID path string true "Organization ID"
-// @Param limit query int false "Limit for pagination"
-// @Param offset query int false "Offset for pagination"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /organizations/{orgID}/users [get]
-func (r *userRoutes) ListUsersByOrganization(c *gin.Context) {
-	orgID, err := uuid.Parse(c.Param("orgID"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "invalid organization ID format"})
-		return
-	}
-	limit := 10
-	offset := 0
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if val, err := strconv.Atoi(limitStr); err == nil {
-			limit = val
-		}
-	}
-	if offsetStr := c.Query("offset"); offsetStr != "" {
-		if val, err := strconv.Atoi(offsetStr); err == nil {
-			offset = val
-		}
-	}
-	users, err := r.userService.ListUsersByOrganization(c.Request.Context(), orgID, limit, offset)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, &entities.ApiResponse{Success: false, Error: err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, &entities.ApiResponse{Success: true, Data: users})
-}
-
-// @Summary Get user by ID and organization
-// @Description Get a user by their ID and organization
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param orgID path string true "Organization ID"
-// @Param id path string true "User ID"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /organizations/{orgID}/users/{id} [get]
-func (r *userRoutes) GetUserByIDAndOrganization(c *gin.Context) {
-	orgID, err := uuid.Parse(c.Param("orgID"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "invalid organization ID format"})
-		return
-	}
-	userID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "invalid user ID format"})
-		return
-	}
-	user, err := r.userService.GetUserByIDAndOrganization(c.Request.Context(), userID, orgID)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, &entities.ApiResponse{Success: false, Error: err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, &entities.ApiResponse{Success: true, Data: user})
-}
-
-// @Summary Get user by phone number and organization
-// @Description Get a user by their phone number and organization
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param orgID path string true "Organization ID"
-// @Param phone path string true "Phone Number"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /organizations/{orgID}/users/phone/{phone} [get]
-func (r *userRoutes) GetUserByPhoneNumberAndOrganization(c *gin.Context) {
-	orgID, err := uuid.Parse(c.Param("orgID"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "invalid organization ID format"})
-		return
-	}
-	phoneNumber := c.Param("phone")
-	if phoneNumber == "" {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "phone number is required"})
-		return
-	}
-	user, err := r.userService.GetUserByPhoneNumberAndOrganization(c.Request.Context(), phoneNumber, orgID)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, &entities.ApiResponse{Success: false, Error: err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, &entities.ApiResponse{Success: true, Data: user})
-}
-
-// @Summary Get user by username and organization
-// @Description Get a user by their username and organization
-// @Tags users
-// @Accept json
-// @Produce json
-// @Param orgID path string true "Organization ID"
-// @Param username path string true "Username"
-// @Success 200 {object} entities.ApiResponse
-// @Failure 400 {object} entities.ApiResponse
-// @Failure 500 {object} entities.ApiResponse
-// @Router /organizations/{orgID}/users/username/{username} [get]
-func (r *userRoutes) GetUserByUsernameAndOrganization(c *gin.Context) {
-	orgID, err := uuid.Parse(c.Param("orgID"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "invalid organization ID format"})
-		return
-	}
-	username := c.Param("username")
-	if username == "" {
-		c.JSON(http.StatusBadRequest, &entities.ApiResponse{Success: false, Error: "username is required"})
-		return
-	}
-	user, err := r.userService.GetUserByUsernameAndOrganization(c.Request.Context(), username, orgID)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, &entities.ApiResponse{Success: false, Error: err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, &entities.ApiResponse{Success: true, Data: user})
-}
-
 // @Summary Login
-// @Description Login a user
-// @Tags users
+// @Description Authenticate a user with email/phone and password
+// @Tags auth
 // @Accept json
 // @Produce json
-// @Param input body entities.LoginInput true "Login details"
+// @Param input body entities.LoginRequest true "Login details"
 // @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 401 {object} entities.ApiResponse
+// @Failure 403 {object} entities.ApiResponse
+// @Failure 404 {object} entities.ApiResponse
+// @Router /auth/login [post]
 func (r *userRoutes) Login(c *gin.Context) {
-	var input entities.LoginInput
+	var input entities.LoginRequest
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
 			Success: false,
@@ -461,18 +202,303 @@ func (r *userRoutes) Login(c *gin.Context) {
 		return
 	}
 
-	if input.Username == "" || input.Password == "" {
+	if input.PhoneNumber == "" || input.Password == "" {
 		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
 			Success: false,
-			Error:   "username and password are required",
+			Error:   "phone number and password are required",
 		})
 		return
 	}
 
-	user, err := r.userService.Login(c.Request.Context(), &input)
+	loginResponse, err := r.userService.Login(c.Request.Context(), &input)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, &entities.ApiResponse{Success: false, Error: err.Error()})
+		status := http.StatusInternalServerError
+		if err.Error() == "user not found" {
+			status = http.StatusNotFound
+		} else if err.Error() == "password is incorrect" {
+			status = http.StatusUnauthorized
+		} else if err.Error() == "user account is inactive" {
+			status = http.StatusForbidden
+		} else if err.Error() == "email or phone is required" {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
 		return
 	}
-	c.JSON(http.StatusOK, &entities.ApiResponse{Success: true, Data: user})
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Data:    loginResponse,
+	})
+}
+
+// @Summary Forgot Password
+// @Description Initiate password reset process
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.ForgotPasswordRequest true "Forgot password request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 404 {object} entities.ApiResponse
+// @Router /auth/forgot-password [post]
+func (r *userRoutes) ForgotPassword(c *gin.Context) {
+	var input entities.ForgotPasswordRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.ForgotPassword(c.Request.Context(), &input)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "user not found" {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Password reset instructions sent to your email",
+	})
+}
+
+// @Summary Reset Password
+// @Description Reset password using token
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.ResetPasswordRequest true "Reset password request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Router /auth/reset-password [post]
+func (r *userRoutes) ResetPassword(c *gin.Context) {
+	var input entities.ResetPasswordRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.ResetPassword(c.Request.Context(), &input)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Password reset successfully",
+	})
+}
+
+// @Summary Change Password
+// @Description Change user's password
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.ChangePasswordRequest true "Change password request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 501 {object} entities.ApiResponse
+// @Router /auth/change-password [post]
+func (r *userRoutes) ChangePassword(c *gin.Context) {
+	var input entities.ChangePasswordRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.ChangePassword(c.Request.Context(), &input)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "change password not implemented" {
+			status = http.StatusNotImplemented
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Password changed successfully",
+	})
+}
+
+// @Summary Verify Phone
+// @Description Verify phone number with code
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.VerifyPhoneRequest true "Phone verification request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 404 {object} entities.ApiResponse
+// @Router /auth/verify-phone [post]
+func (r *userRoutes) VerifyPhone(c *gin.Context) {
+	var input entities.VerifyPhoneRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.VerifyPhone(c.Request.Context(), &input)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "user not found" {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Phone number verified successfully",
+	})
+}
+
+// @Summary Resend Verification Code
+// @Description Resend SMS verification code
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.ResendVerificationCodeRequest true "Resend code request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 404 {object} entities.ApiResponse
+// @Router /auth/resend-verification-code [post]
+func (r *userRoutes) ResendVerificationCode(c *gin.Context) {
+	var input entities.ResendVerificationCodeRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.ResendVerificationCode(c.Request.Context(), &input)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "user not found" {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Verification code sent successfully",
+	})
+}
+
+// @Summary Verify Email
+// @Description Verify email address with token
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.VerifyEmailRequest true "Email verification request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 404 {object} entities.ApiResponse
+// @Router /auth/verify-email [post]
+func (r *userRoutes) VerifyEmail(c *gin.Context) {
+	var input entities.VerifyEmailRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.VerifyEmail(c.Request.Context(), &input)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "user not found" {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Email verified successfully",
+	})
+}
+
+// @Summary Resend Verification Email
+// @Description Resend email verification link
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param input body entities.ResendVerificationEmailRequest true "Resend email request"
+// @Success 200 {object} entities.ApiResponse
+// @Failure 400 {object} entities.ApiResponse
+// @Failure 404 {object} entities.ApiResponse
+// @Router /auth/resend-verification-email [post]
+func (r *userRoutes) ResendVerificationEmail(c *gin.Context) {
+	var input entities.ResendVerificationEmailRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	err := r.userService.ResendVerificationEmail(c.Request.Context(), &input)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err.Error() == "user not found" {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, &entities.ApiResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, &entities.ApiResponse{
+		Success: true,
+		Message: "Verification email sent successfully",
+	})
 }

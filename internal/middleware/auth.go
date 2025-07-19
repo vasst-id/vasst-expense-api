@@ -18,10 +18,10 @@ const (
 )
 
 type JWTClaims struct {
-	UserID         uuid.UUID `json:"user_id"`
-	OrganizationID uuid.UUID `json:"organization_id"`
-	Username       string    `json:"username"`
-	RoleID         int64     `json:"role_id"`
+	UserID      uuid.UUID `json:"user_id"`
+	PhoneNumber string    `json:"phone_number"`
+	Email       string    `json:"email"`
+	Status      int64     `json:"status"`
 	jwt.RegisteredClaims
 }
 
@@ -35,12 +35,12 @@ func NewAuthMiddleware(secretKey string) *AuthMiddleware {
 	}
 }
 
-func (m *AuthMiddleware) GenerateToken(userID uuid.UUID, organizationID uuid.UUID, username string, roleID int64) (string, error) {
+func (m *AuthMiddleware) GenerateToken(user *entities.User) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, JWTClaims{
-		UserID:         userID,
-		OrganizationID: organizationID,
-		Username:       username,
-		RoleID:         roleID,
+		UserID:      user.UserID,
+		PhoneNumber: user.PhoneNumber,
+		Email:       user.Email,
+		Status:      int64(user.Status),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -98,71 +98,9 @@ func (m *AuthMiddleware) AuthRequired() gin.HandlerFunc {
 		}
 
 		c.Set("user_id", claims.UserID)
-		c.Set("username", claims.Username)
-		c.Set("role_id", claims.RoleID)
-		c.Set("organization_id", claims.OrganizationID)
+		c.Set("phone_number", claims.PhoneNumber)
+		c.Set("email", claims.Email)
+		c.Set("status", claims.Status)
 		c.Next()
 	}
-}
-
-func (m *AuthMiddleware) RoleRequired(roleIDs ...int64) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		roleID, exists := c.Get("role_id")
-		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "role not found in context"})
-			c.Abort()
-			return
-		}
-
-		roleIDInt64, ok := roleID.(int64)
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role type"})
-			c.Abort()
-			return
-		}
-
-		for _, requiredRoleID := range roleIDs {
-			if roleIDInt64 == requiredRoleID {
-				c.Next()
-				return
-			}
-		}
-
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
-		c.Abort()
-	}
-}
-
-// SuperAdminRequired middleware that checks if user has SuperAdmin role
-func (m *AuthMiddleware) SuperAdminRequired() gin.HandlerFunc {
-	return gin.HandlerFunc(func(c *gin.Context) {
-		// First check if user is authenticated
-		m.AuthRequired()(c)
-		if c.IsAborted() {
-			return
-		}
-
-		// Then check if user has SuperAdmin role
-		roleID, exists := c.Get("role_id")
-		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "role not found in context"})
-			c.Abort()
-			return
-		}
-
-		roleIDInt64, ok := roleID.(int64)
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid role type"})
-			c.Abort()
-			return
-		}
-
-		if roleIDInt64 != entities.RoleSuperAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "superadmin access required"})
-			c.Abort()
-			return
-		}
-
-		c.Next()
-	})
 }
